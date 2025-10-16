@@ -2,6 +2,9 @@ import os
 import json
 import asyncio
 import shutil
+import uuid
+import time
+import wave
 from typing import Optional, List, Dict, Any
 
 import numpy as np
@@ -87,6 +90,27 @@ def transcribe_buffer(audio_float32: np.ndarray, task: str = "transcribe", langu
 @app.websocket("/ws")
 async def websocket_stream(ws: WebSocket):
     await ws.accept()
+    # session & logging
+    session_id = uuid.uuid4().hex
+    log_dir = os.environ.get("ASR_LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"{session_id}.jsonl")
+    log_fp = open(log_path, "a", encoding="utf-8")
+    # input audio saving setup
+    input_dir = os.environ.get("ASR_INPUT_DIR", "inputs")
+    os.makedirs(input_dir, exist_ok=True)
+    input_path = os.path.join(input_dir, f"{session_id}.wav")
+    wave_writer = None
+
+    def log_event(ev: Dict[str, Any]):
+        try:
+            ev = dict(ev)
+            ev.setdefault("session_id", session_id)
+            ev.setdefault("ts", time.time())
+            log_fp.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            log_fp.flush()
+        except Exception:
+            pass
     # session state
     sample_rate = 16000
     task = "transcribe"
@@ -104,6 +128,23 @@ async def websocket_stream(ws: WebSocket):
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
         "sample_rate": sample_rate,
+        "session_id": session_id,
+        "log_path": log_path,
+        "input_path": input_path,
+    })
+    # write ready event
+    client = getattr(ws, "client", None)
+    client_host = getattr(client, "host", None)
+    client_port = getattr(client, "port", None)
+    log_event({
+        "type": "ready",
+        "model": MODEL_NAME,
+        "device": DEVICE,
+        "compute_type": COMPUTE_TYPE,
+        "sample_rate": sample_rate,
+        "client_host": client_host,
+        "client_port": client_port,
+        "input_path": input_path,
     })
 
     try:
@@ -133,7 +174,24 @@ async def websocket_stream(ws: WebSocket):
                             "sample_rate": sample_rate,
                             "task": task,
                             "language": language,
+                            "input_path": input_path,
                         })
+                        log_event({
+                            "type": "start",
+                            "sample_rate": sample_rate,
+                            "task": task,
+                            "language": language,
+                        })
+                        # open wav writer for input audio
+                        if wave_writer is None:
+                            try:
+                                ww = wave.open(input_path, "wb")
+                                ww.setnchannels(1)
+                                ww.setsampwidth(2)
+                                ww.setframerate(sample_rate)
+                                wave_writer = ww
+                            except Exception:
+                                wave_writer = None
                         continue
                     elif isinstance(msg, dict) and msg.get("type") == "stop":
                         # final decode
@@ -150,7 +208,9 @@ async def websocket_stream(ws: WebSocket):
                             new_segs = [s for s in segs if s["end"] > last_sent_end_sec + 1e-3]
                             if new_segs:
                                 await ws.send_json({"type": "segments", "segments": new_segs, "final": True})
+                                log_event({"type": "segments", "segments": new_segs, "final": True})
                         await ws.send_json({"type": "done"})
+                        log_event({"type": "done"})
                         await ws.close()
                         return
                     else:
@@ -159,6 +219,21 @@ async def websocket_stream(ws: WebSocket):
                 elif "bytes" in message and message["bytes"] is not None:
                     # binary audio chunk (PCM16LE)
                     chunk = message["bytes"]
+                    # write PCM16 chunks into session wav
+                    if wave_writer is None:
+                        try:
+                            ww = wave.open(input_path, "wb")
+                            ww.setnchannels(1)
+                            ww.setsampwidth(2)
+                            ww.setframerate(sample_rate)
+                            wave_writer = ww
+                        except Exception:
+                            wave_writer = None
+                    try:
+                        if wave_writer is not None:
+                            wave_writer.writeframes(chunk)
+                    except Exception:
+                        pass
                     buffer.extend(chunk)
 
                     # when enough audio accumulated, run decode
@@ -179,6 +254,7 @@ async def websocket_stream(ws: WebSocket):
                         if new_segs:
                             await ws.send_json({"type": "segments", "segments": new_segs})
                             last_sent_end_sec = max(last_sent_end_sec, max(s["end"] for s in new_segs))
+                            log_event({"type": "segments", "segments": new_segs})
 
                         # trim buffer to keep tail for context
                         keep_from_sec = max(last_sent_end_sec - context_sec, 0.0)
@@ -201,12 +277,36 @@ async def websocket_stream(ws: WebSocket):
                     # other receive message without text/bytes
                     pass
             elif mtype == "websocket.disconnect":
+                log_event({"type": "disconnect"})
+                try:
+                    if wave_writer is not None:
+                        wave_writer.close()
+                        wave_writer = None
+                except Exception:
+                    pass
                 break
             else:
                 # ping/pong etc.
                 pass
     except WebSocketDisconnect:
+        log_event({"type": "disconnect"})
+        try:
+            if wave_writer is not None:
+                wave_writer.close()
+                wave_writer = None
+        except Exception:
+            pass
         return
+    finally:
+        try:
+            if wave_writer is not None:
+                wave_writer.close()
+        except Exception:
+            pass
+        try:
+            log_fp.close()
+        except Exception:
+            pass
 
 
 @app.post("/api/transcribe")

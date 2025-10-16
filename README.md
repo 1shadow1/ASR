@@ -112,6 +112,57 @@ ASR_MODEL=large-v3 ASR_DEVICE=cuda ASR_COMPUTE_TYPE=float16 \
 - 依赖缺失：若报 `python-multipart` 未安装，执行 `pip install python-multipart`。
 - 首次运行下载模型较慢：可预先拉取或使用较小模型（如 `base/small`）。
 
+### 日志（JSONL）
+
+实时识别的会话日志会写入 `logs/<session_id>.jsonl`（可通过环境变量 `ASR_LOG_DIR` 修改目录）。日志包括：
+
+- `ready`：服务端返回模型、设备、`session_id` 与 `log_path`。
+- `start`：收到客户端的开始控制消息与采样率、任务类型等。
+- `segments`：逐批次识别结果（包含 `start/end/text`）。
+- `done`：会话结束并发送最终分段。
+- `disconnect`：连接关闭（正常或异常）。
+
+示例：
+
+```jsonl
+{"type":"ready","model":"small","device":"cpu","compute_type":"int8","sample_rate":16000,"session_id":"...","log_path":"logs/....jsonl"}
+{"type":"start","sample_rate":16000,"task":"transcribe","language":null}
+{"type":"segments","segments":[{"start":0.0,"end":1.2,"text":"..."}]}
+{"type":"done"}
+{"type":"disconnect"}
+```
+
+### 输入音频保存（WAV）
+
+服务端会在每次 WebSocket 会话期间保存输入的原始音频为 `WAV` 文件，默认路径：`inputs/<session_id>.wav`。该目录可通过环境变量 `ASR_INPUT_DIR` 配置。
+
+- 返回字段：在 `ready` 与 `ack` 消息中会包含 `input_path`，例如：
+
+```json
+{
+  "type": "ready",
+  "sample_rate": 16000,
+  "session_id": "69f1510d9f4649c3b436eb3ef55c833a",
+  "log_path": "logs/69f1510d9f4649c3b436eb3ef55c833a.jsonl",
+  "input_path": "inputs/69f1510d9f4649c3b436eb3ef55c833a.wav"
+}
+```
+
+- 文件格式：`mono` 单声道、`PCM16`、采样率为客户端声明的 `sample_rate`（网页与示例客户端均为 `16kHz`）。
+- 生命周期：在收到 `stop`/`disconnect` 后会关闭并完成写入；异常断开也会在服务端进行资源清理。
+- 用途：便于后期复核与模型对比评估，可直接用 `ffplay` 或任意播放器打开：
+
+```bash
+ffplay -nodisp -autoexit inputs/<session_id>.wav
+```
+
+环境变量示例：
+
+```bash
+ASR_INPUT_DIR=/srv/ASR/inputs ASR_LOG_DIR=/srv/ASR/logs \
+  uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+```
+
 ## 提示与建议
 
 - 首次运行会自动下载所选模型文件，时间取决于网络与模型大小。

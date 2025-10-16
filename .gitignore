@@ -1,4 +1,7 @@
 *.mp3
 *.wav
+*.pyc
+/__pycache__/*
+/logs/*
 /outputs/*
 /samples/*
