@@ -45,6 +45,29 @@ python asr_cli.py <音频路径> --task translate
 
 输出会在 `outputs/` 目录生成同名 `.srt` 和 `.json` 文件，并汇总 `index.json`。
 
+## 流式服务与客户端
+
+### 启动服务（FastAPI + WebSocket）
+
+```bash
+source .venv/bin/activate
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+- Web UI: 打开 `http://localhost:8000/`，允许麦克风，实时看到识别输出。
+- WebSocket: `ws://localhost:8000/ws` 接收 `PCM16LE @ 16kHz` 二进制分片；控制消息：
+  - `{"type":"start","sample_rate":16000}` 初始化；
+  - 连续发送二进制音频；
+  - `{"type":"stop"}` 完成并返回最终片段。
+
+### Python 客户端（文件流式发送）
+
+```bash
+python client_stream.py --file samples/osr.wav --url ws://localhost:8000/ws --chunk-ms 200
+```
+
+注意：当前客户端示例要求 WAV 为 `16kHz/mono/PCM16`，其他格式请先转换。
+
 ## 提示与建议
 
 - 首次运行会自动下载所选模型文件，时间取决于网络与模型大小。

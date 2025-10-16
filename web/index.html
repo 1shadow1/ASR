@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ASR 流式识别演示</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 20px; }
+    #log { white-space: pre-wrap; border: 1px solid #ddd; padding: 10px; min-height: 180px; }
+    button { margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <h1>ASR 流式识别演示</h1>
+  <div>
+    <button id="btnStart">开始</button>
+    <button id="btnStop" disabled>停止</button>
+    <span id="status"></span>
+  </div>
+  <h3>实时输出</h3>
+  <div id="log"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+
+    let ws = null;
+    let audioContext = null;
+    let processor = null;
+    let source = null;
+
+    const targetRate = 16000;
+
+    function appendLog(text) {
+      logEl.textContent += text + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function floatTo16BitPCM(float32Array) {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      let offset = 0;
+      for (let i = 0; i < float32Array.length; i++, offset += 2) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      }
+      return buffer;
+    }
+
+    function downsampleBuffer(buffer, sampleRate, outRate) {
+      if (outRate === sampleRate) return buffer;
+      const ratio = sampleRate / outRate;
+      const newLength = Math.round(buffer.length / ratio);
+      const result = new Float32Array(newLength);
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+      while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+        let accum = 0, count = 0;
+        for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+          accum += buffer[i];
+          count++;
+        }
+        result[offsetResult] = accum / (count || 1);
+        offsetResult++;
+        offsetBuffer = nextOffsetBuffer;
+      }
+      return result;
+    }
+
+    function startStreaming() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => {
+        statusEl.textContent = '连接已建立';
+        ws.send(JSON.stringify({ type: 'start', sample_rate: targetRate }));
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'segments') {
+            msg.segments.forEach(s => appendLog(s.text));
+          } else if (msg.type === 'ready' || msg.type === 'ack') {
+            appendLog(`[${msg.type}] ${JSON.stringify(msg)}`);
+          } else if (msg.type === 'done') {
+            statusEl.textContent = '已结束';
+          }
+        } catch (e) {
+          appendLog(ev.data);
+        }
+      };
+      ws.onclose = () => { statusEl.textContent = '连接关闭'; };
+      ws.onerror = (e) => { console.error(e); };
+
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        source = audioContext.createMediaStreamSource(stream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (e) => {
+          const input = e.inputBuffer.getChannelData(0);
+          const down = downsampleBuffer(input, audioContext.sampleRate, targetRate);
+          const pcm = floatTo16BitPCM(down);
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcm);
+        };
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+      }).catch(err => {
+        appendLog('麦克风访问失败: ' + err);
+      });
+    }
+
+    function stopStreaming() {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'stop' }));
+      if (processor) processor.disconnect();
+      if (source) source.disconnect();
+      if (audioContext) audioContext.close();
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+    }
+
+    btnStart.onclick = startStreaming;
+    btnStop.onclick = stopStreaming;
+  </script>
+</body>
+</html>
