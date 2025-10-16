@@ -51,22 +51,66 @@ python asr_cli.py <音频路径> --task translate
 
 ```bash
 source .venv/bin/activate
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-- Web UI: 打开 `http://localhost:8000/`，允许麦克风，实时看到识别输出。
-- WebSocket: `ws://localhost:8000/ws` 接收 `PCM16LE @ 16kHz` 二进制分片；控制消息：
+- Web UI: 打开 `http://localhost:8001/web/`，允许麦克风，实时看到识别输出。
+- WebSocket: `ws://localhost:8001/ws` 接收 `PCM16LE @ 16kHz` 二进制分片；控制消息：
   - `{"type":"start","sample_rate":16000}` 初始化；
   - 连续发送二进制音频；
   - `{"type":"stop"}` 完成并返回最终片段。
 
+提示：某些环境下 `localhost` 可能握手超时，改用 `127.0.0.1` 可避免解析/IPv6问题。
+
 ### Python 客户端（文件流式发送）
 
+客户端会自动重采样任意采样率的 `PCM16 WAV` 到 `16kHz`，并支持立体声转单声道：
+
 ```bash
-python client_stream.py --file samples/osr.wav --url ws://localhost:8000/ws --chunk-ms 200
+python client_stream.py --file /path/to/audio.wav --url ws://127.0.0.1:8001/ws --chunk-ms 200
 ```
 
-注意：当前客户端示例要求 WAV 为 `16kHz/mono/PCM16`，其他格式请先转换。
+### REST 文件转写接口
+
+服务同时提供 REST 上传并转写的接口：
+
+```bash
+curl -F "file=@/path/to/audio.wav" "http://localhost:8001/api/transcribe?task=transcribe&language=zh"
+```
+
+返回示例：
+
+```json
+{
+  "language": "zh",
+  "duration": 12.34,
+  "segments": [{"id":0,"start":0.0,"end":2.1,"text":"..."}],
+  "model": "small",
+  "device": "cpu",
+  "compute_type": "int8"
+}
+```
+
+### 环境变量配置（模型与设备）
+
+- `ASR_MODEL`：默认 `small`，可选 `tiny`/`base`/`medium`/`large-v3` 等。
+- `ASR_DEVICE`：`auto`/`cpu`/`cuda`，默认自动检测。
+- `ASR_COMPUTE_TYPE`：默认根据设备选择，GPU 推荐 `float16`，CPU 推荐 `int8` 或 `int8_float32`。
+
+示例：
+
+```bash
+ASR_MODEL=large-v3 ASR_DEVICE=cuda ASR_COMPUTE_TYPE=float16 \
+  uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+```
+
+### 常见问题与排查
+
+- WebSocket 403 或握手失败：不要将静态资源挂载在根路径 `/`；当前页面挂载在 `/web/`，WebSocket 在 `/ws`。若 `localhost` 握手超时，改用 `ws://127.0.0.1:8001/ws`。
+- BufferError: 若服务端日志出现 `cannot resize buffer`，已在 `server.py` 中对 `np.frombuffer(...).copy()` 进行修复以避免视图持有导致扩容失败。
+- 识别没有输出：确保输入为人声；可将 `min_chunk_sec` 降低（如 1.0），或在客户端降低 `--chunk-ms`（如 100）提高解码频率。
+- 依赖缺失：若报 `python-multipart` 未安装，执行 `pip install python-multipart`。
+- 首次运行下载模型较慢：可预先拉取或使用较小模型（如 `base/small`）。
 
 ## 提示与建议
 
